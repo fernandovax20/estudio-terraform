@@ -1,0 +1,14 @@
+# Datos de LocalStack (persistencia local)
+localstack-data/
+
+# Terraform
+**/.terraform/
+**/*.tfstate
+**/*.tfstate.backup
+**/.terraform.lock.hcl
+
+# Archivos temporales
+*.zip
+*.bak
+.DS_Store
+Thumbs.db

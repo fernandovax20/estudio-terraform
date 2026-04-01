@@ -1,0 +1,206 @@
+# ============================================================
+# EJEMPLO: GitHub Actions para Terraform
+# ============================================================
+# Este archivo iría en: .github/workflows/terraform.yml
+# Es el "orquestador con pipeline" que mencionaba tu compañero.
+#
+# NO lo ejecutamos en LocalStack — es una REFERENCIA para
+# cuando trabajes en un proyecto real.
+# ============================================================
+
+name: "Terraform CI/CD"
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'infrastructure/**'       # Solo se ejecuta si cambian archivos .tf
+
+  push:
+    branches: [main]
+    paths:
+      - 'infrastructure/**'
+
+# Los secretos se configuran en GitHub → Settings → Secrets
+# NUNCA se hardcodean en el archivo
+env:
+  AWS_REGION: us-east-1
+  TF_VERSION: "1.7.0"
+
+permissions:
+  contents: read
+  pull-requests: write           # Para comentar el plan en el PR
+  id-token: write                # Para OIDC con AWS (sin access keys)
+
+jobs:
+  # ═══════════════════════════════════════════
+  # JOB 1: VALIDACIÓN (en cada push a un PR)
+  # ═══════════════════════════════════════════
+  validate:
+    name: "Validar Terraform"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+        working-directory: infrastructure/
+
+      - name: Terraform Init
+        run: terraform init -backend=false
+        working-directory: infrastructure/
+
+      - name: Terraform Validate
+        run: terraform validate
+        working-directory: infrastructure/
+
+  # ═══════════════════════════════════════════
+  # JOB 2: SEGURIDAD (escaneo de vulnerabilidades)
+  # ═══════════════════════════════════════════
+  security:
+    name: "Escaneo de Seguridad"
+    runs-on: ubuntu-latest
+    needs: validate
+
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      # tfsec: escanea tu código Terraform por problemas de seguridad
+      # Ejemplo: "S3 bucket sin encriptación" → FALLA el pipeline
+      - name: tfsec
+        uses: aquasecurity/tfsec-action@v1.0.0
+        with:
+          working_directory: infrastructure/
+          soft_fail: false         # false = bloquea el PR si hay problemas
+
+      # checkov: otro scanner de seguridad (más reglas)
+      - name: Checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: infrastructure/
+          framework: terraform
+          quiet: true
+
+  # ═══════════════════════════════════════════
+  # JOB 3: PLAN (muestra qué va a cambiar)
+  # ═══════════════════════════════════════════
+  plan:
+    name: "Terraform Plan"
+    runs-on: ubuntu-latest
+    needs: [validate, security]
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      # Autenticación con AWS usando OIDC (sin access keys permanentes)
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::123456789012:role/terraform-pipeline-plan
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        run: terraform init
+        working-directory: infrastructure/
+
+      - name: Terraform Plan
+        id: plan
+        run: terraform plan -no-color -out=tfplan
+        working-directory: infrastructure/
+        continue-on-error: true
+
+      # Estimar costos con Infracost
+      - name: Setup Infracost
+        uses: infracost/actions/setup@v3
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+
+      - name: Infracost Breakdown
+        run: infracost breakdown --path infrastructure/ --format json --out-file /tmp/infracost.json
+
+      # Publicar el plan como COMENTARIO en el PR
+      # Así todo el equipo puede revisar qué cambiará
+      - name: Comentar Plan en PR
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const output = `### Terraform Plan 📋
+
+            \`\`\`
+            ${{ steps.plan.outputs.stdout }}
+            \`\`\`
+
+            **Resultado:** ${{ steps.plan.outcome }}
+
+            *Pusheado por: @${{ github.actor }}, Action: \`${{ github.event_name }}\`*`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            })
+
+      - name: Plan Status
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+
+  # ═══════════════════════════════════════════
+  # JOB 4: APPLY (solo al hacer merge a main)
+  # ═══════════════════════════════════════════
+  apply:
+    name: "Terraform Apply"
+    runs-on: ubuntu-latest
+    needs: [validate, security]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production          # Requiere aprobación manual en GitHub
+
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      # Rol con permisos COMPLETOS (solo se usa en main)
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::123456789012:role/terraform-pipeline-apply
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        run: terraform init
+        working-directory: infrastructure/
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve
+        working-directory: infrastructure/
+
+      # Notificar al equipo
+      - name: Notificar Slack
+        if: always()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          text: "Terraform Apply ${{ job.status }} en producción"
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}

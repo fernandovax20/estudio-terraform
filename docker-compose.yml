@@ -1,0 +1,24 @@
+# ============================================================
+# LOCALSTACK - Simulador de servicios AWS en tu máquina local
+# ============================================================
+# Ejecutar: docker-compose up -d
+# Verificar: curl http://localhost:4566/_localstack/health
+# Detener:  docker-compose down
+# ============================================================
+
+services:
+  localstack:
+    image: localstack/localstack:latest
+    container_name: terraform-lab
+    ports:
+      - "4566:4566"       # Puerto principal de LocalStack
+      - "4510-4559:4510-4559" # Rango de puertos para servicios
+    environment:
+      # Servicios AWS que queremos simular
+      - SERVICES=s3,dynamodb,iam,lambda,sqs,sns,ec2,sts,cloudwatch,logs,apigateway,ssm
+      - DEBUG=0
+      - DATA_DIR=/var/lib/localstack/data
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    volumes:
+      - "./localstack-data:/var/lib/localstack"
+      - "/var/run/docker.sock:/var/run/docker.sock"

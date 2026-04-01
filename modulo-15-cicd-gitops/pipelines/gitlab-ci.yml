@@ -1,0 +1,105 @@
+# ============================================================
+# EJEMPLO: GitLab CI para Terraform
+# ============================================================
+# Este archivo iría en la raíz del repositorio como .gitlab-ci.yml
+# Es otra opción de "orquestador con pipeline".
+#
+# NO lo ejecutamos en LocalStack — es una REFERENCIA.
+# ============================================================
+
+image:
+  name: hashicorp/terraform:1.7.0
+  entrypoint: [""]
+
+variables:
+  TF_ROOT: infrastructure/
+  TF_STATE_NAME: default
+
+# Los secretos se configuran en GitLab → Settings → CI/CD → Variables:
+# - AWS_ACCESS_KEY_ID
+# - AWS_SECRET_ACCESS_KEY
+# - AWS_DEFAULT_REGION
+
+cache:
+  key: terraform
+  paths:
+    - ${TF_ROOT}/.terraform/
+
+stages:
+  - validate     # ← Cada PR
+  - security     # ← Cada PR
+  - plan         # ← Cada PR
+  - apply        # ← Solo en main
+
+# ═══════════════════════════════════════════
+# STAGE 1: VALIDAR
+# ═══════════════════════════════════════════
+fmt:
+  stage: validate
+  script:
+    - cd ${TF_ROOT}
+    - terraform fmt -check -recursive
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+validate:
+  stage: validate
+  script:
+    - cd ${TF_ROOT}
+    - terraform init -backend=false
+    - terraform validate
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+# ═══════════════════════════════════════════
+# STAGE 2: SEGURIDAD
+# ═══════════════════════════════════════════
+tfsec:
+  stage: security
+  image:
+    name: aquasec/tfsec:latest
+    entrypoint: [""]
+  script:
+    - tfsec ${TF_ROOT} --format json --out tfsec-report.json
+  artifacts:
+    reports:
+      terraform: tfsec-report.json
+  allow_failure: false    # Bloquea el MR si hay problemas
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+
+# ═══════════════════════════════════════════
+# STAGE 3: PLAN
+# ═══════════════════════════════════════════
+plan:
+  stage: plan
+  script:
+    - cd ${TF_ROOT}
+    - terraform init
+    - terraform plan -out=plan.tfplan
+  artifacts:
+    paths:
+      - ${TF_ROOT}/plan.tfplan    # Se guarda para el apply
+    expire_in: 1 hour
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+# ═══════════════════════════════════════════
+# STAGE 4: APPLY (solo en main, manual)
+# ═══════════════════════════════════════════
+apply:
+  stage: apply
+  script:
+    - cd ${TF_ROOT}
+    - terraform init
+    - terraform apply plan.tfplan
+  dependencies:
+    - plan
+  when: manual           # ← Requiere click manual para seguridad
+  only:
+    - main
+  environment:
+    name: production
